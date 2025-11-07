@@ -1,8 +1,9 @@
 import asyncio
 import os
+import secrets
 import discord
 from discord.ext import commands
-from flask import Flask, redirect, request
+from flask import Flask, redirect, request, session
 import threading
 import aiohttp
 from dotenv import load_dotenv
@@ -13,12 +14,13 @@ DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "").strip()
 CLIENT_ID = os.getenv("CLIENT_ID", "").strip()
 CLIENT_SECRET = os.getenv("CLIENT_SECRET", "").strip()
 REDIRECT_URI = os.getenv("REDIRECT_URI", "https://{your-repl-url}.repl.co/callback").strip()
+SESSION_SECRET = os.getenv("SESSION_SECRET", secrets.token_hex(32))
 
 intents = discord.Intents.default()
-intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 app = Flask(__name__)
+app.secret_key = SESSION_SECRET
 
 @bot.event
 async def on_ready():
@@ -32,23 +34,32 @@ def home():
 
 @app.route("/login")
 def login():
+    state = secrets.token_urlsafe(32)
+    session['oauth_state'] = state
     oauth_url = (
         f"https://discord.com/api/oauth2/authorize?"
         f"client_id={CLIENT_ID}&"
         f"redirect_uri={REDIRECT_URI}&"
         f"response_type=code&"
-        f"scope=identify+guilds"
+        f"scope=identify+guilds&"
+        f"state={state}"
     )
     return redirect(oauth_url)
 
 @app.route("/callback")
 async def callback():
     code = request.args.get('code')
+    state = request.args.get('state')
+    
     if not code:
         return "<h1>Error</h1><p>No authorization code provided</p>", 400
+    
+    stored_state = session.pop('oauth_state', None)
+    if not stored_state or state != stored_state:
+        return "<h1>Error</h1><p>Invalid state parameter. Please try logging in again.</p>", 400
 
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession() as http_session:
             token_data = {
                 'client_id': CLIENT_ID,
                 'client_secret': CLIENT_SECRET,
@@ -59,33 +70,63 @@ async def callback():
             }
 
             headers = {"Content-Type": "application/x-www-form-urlencoded"}
-            async with session.post('https://discord.com/api/v10/oauth2/token', data=token_data, headers=headers) as token_resp:
+            async with http_session.post('https://discord.com/api/v10/oauth2/token', data=token_data, headers=headers) as token_resp:
+                if token_resp.status != 200:
+                    error_data = await token_resp.json()
+                    error_msg = error_data.get("error_description", "Failed to exchange authorization code")
+                    return f"<h1>Error</h1><p>OAuth error: {error_msg}</p>", 400
                 token_json = await token_resp.json()
             
             access_token = token_json.get("access_token")
             if not access_token:
-                error_msg = token_json.get("error_description", "Unknown error")
-                return f"<h1>Error</h1><p>Failed to get access token: {error_msg}</p>", 400
+                return f"<h1>Error</h1><p>No access token received from Discord</p>", 400
             
             auth_headers = {"Authorization": f"Bearer {access_token}"}
-            async with session.get("https://discord.com/api/v10/users/@me", headers=auth_headers) as user_resp:
+            async with http_session.get("https://discord.com/api/v10/users/@me", headers=auth_headers) as user_resp:
+                if user_resp.status != 200:
+                    return f"<h1>Error</h1><p>Failed to fetch user information from Discord</p>", 400
                 user_data = await user_resp.json()
             
-            user_id = int(user_data.get("id"))
-            username = user_data.get("username")
+            user_id = user_data.get("id")
+            username = user_data.get("username", "User")
+            if not user_id:
+                return f"<h1>Error</h1><p>Failed to get user ID from Discord</p>", 400
+            user_id = int(user_id)
 
-            async with session.get("https://discord.com/api/v10/users/@me/guilds", headers=auth_headers) as guilds_resp:
+            async with http_session.get("https://discord.com/api/v10/users/@me/guilds", headers=auth_headers) as guilds_resp:
+                if guilds_resp.status != 200:
+                    return f"<h1>Error</h1><p>Failed to fetch server list from Discord</p>", 400
                 guilds = await guilds_resp.json()
 
-        guild_list = "\n".join([f"**{g['name']}** (ID: {g['id']})" for g in guilds])
-        dm_message = f"Here are the servers you belong to:\n\n{guild_list}" if guild_list else "You don't belong to any servers."
+        if not guilds:
+            messages_to_send = "You don't belong to any servers."
+        else:
+            guild_lines = [f"**{g.get('name', 'Unknown')}** (ID: {g.get('id', 'N/A')})" for g in guilds]
+            dm_messages = []
+            current_message = "Here are the servers you belong to:\n\n"
+            
+            for line in guild_lines:
+                if len(current_message) + len(line) + 1 > 1900:
+                    dm_messages.append(current_message)
+                    current_message = line + "\n"
+                else:
+                    current_message += line + "\n"
+            
+            if current_message:
+                dm_messages.append(current_message)
+            messages_to_send = dm_messages
 
-        async def send_dm(user_id, message):
+        async def send_dms(user_id, messages):
             user = bot.get_user(user_id)
             if not user:
                 user = await bot.fetch_user(user_id)
             try:
-                await user.send(message)
+                if isinstance(messages, list):
+                    for msg in messages:
+                        await user.send(msg)
+                        await asyncio.sleep(0.5)
+                else:
+                    await user.send(messages)
                 print(f"Successfully sent DM to user {user_id}")
             except discord.Forbidden:
                 print(f"Cannot send DM to user {user_id} - DMs are disabled")
@@ -95,10 +136,11 @@ async def callback():
                 raise
 
         loop = bot.loop
-        future = asyncio.run_coroutine_threadsafe(send_dm(user_id, dm_message), loop)
+        future = asyncio.run_coroutine_threadsafe(send_dms(user_id, messages_to_send), loop)
         try:
-            future.result(timeout=10)
-            return f"<h1>Success!</h1><p>Hello {username}! I have sent your server list to your Discord DMs!</p>"
+            future.result(timeout=30)
+            server_count = len(guilds) if guilds else 0
+            return f"<h1>Success!</h1><p>Hello {username}! I have sent a list of your {server_count} server(s) to your Discord DMs!</p>"
         except discord.Forbidden:
             return f"<h1>Error</h1><p>I cannot send you a DM. Please enable DMs from server members in your Discord privacy settings.</p>", 403
         except Exception as e:
