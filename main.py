@@ -2,6 +2,7 @@ import asyncio
 import os
 import secrets
 import discord
+from discord import app_commands
 from discord.ext import commands
 from flask import Flask, redirect, request, session
 import threading
@@ -17,6 +18,7 @@ REDIRECT_URI = os.getenv("REDIRECT_URI", "https://{your-repl-url}.repl.co/callba
 SESSION_SECRET = os.getenv("SESSION_SECRET", secrets.token_hex(32))
 
 intents = discord.Intents.default()
+intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 app = Flask(__name__)
@@ -26,7 +28,73 @@ app.secret_key = SESSION_SECRET
 async def on_ready():
     if bot.user:
         print(f'Bot is ready! Logged in as {bot.user.name} (ID: {bot.user.id})')
+    try:
+        synced = await bot.tree.sync()
+        print(f'Synced {len(synced)} slash command(s)')
+    except Exception as e:
+        print(f'Failed to sync commands: {e}')
     print('------')
+
+@bot.tree.command(name="scan", description="Get the mutual servers of a user")
+@app_commands.describe(username="The username of the person to scan")
+async def scan(interaction: discord.Interaction, username: str):
+    await interaction.response.defer(ephemeral=True)
+    
+    if not interaction.guild:
+        await interaction.followup.send("This command can only be used in a server!", ephemeral=True)
+        return
+    
+    target_member = None
+    for member in interaction.guild.members:
+        if member.name.lower() == username.lower() or member.display_name.lower() == username.lower():
+            target_member = member
+            break
+    
+    if not target_member:
+        await interaction.followup.send(f"User '{username}' not found in this server.", ephemeral=True)
+        return
+    
+    if target_member.bot:
+        await interaction.followup.send("Cannot scan bot users.", ephemeral=True)
+        return
+    
+    mutual_guilds = []
+    for guild in bot.guilds:
+        if guild.get_member(target_member.id):
+            mutual_guilds.append(guild)
+    
+    if not mutual_guilds:
+        chunks = [f"**{target_member.name}** is only in this server (or I'm not in their other servers)."]
+    else:
+        guild_lines = [f"**{guild.name}** (ID: {guild.id})" for guild in mutual_guilds]
+        server_list_message = f"**{target_member.name}**'s mutual servers with the bot:\n\n" + "\n".join(guild_lines)
+        
+        if len(server_list_message) > 1900:
+            chunks = []
+            current = f"**{target_member.name}**'s mutual servers with the bot:\n\n"
+            for line in guild_lines:
+                if len(current) + len(line) + 1 > 1900:
+                    chunks.append(current)
+                    current = line + "\n"
+                else:
+                    current += line + "\n"
+            if current:
+                chunks.append(current)
+        else:
+            chunks = [server_list_message]
+    
+    try:
+        command_user = interaction.user
+        for chunk in chunks:
+            await command_user.send(chunk)
+            await asyncio.sleep(0.5)
+        
+        await interaction.followup.send(f"Sent {target_member.name}'s server list to your DMs!", ephemeral=True)
+    except discord.Forbidden:
+        await interaction.followup.send("I cannot send you a DM. Please enable DMs from server members in your privacy settings.", ephemeral=True)
+    except Exception as e:
+        print(f"Error sending DM: {e}")
+        await interaction.followup.send("An error occurred while sending the DM.", ephemeral=True)
 
 @app.route("/")
 def home():
