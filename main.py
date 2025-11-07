@@ -9,10 +9,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-CLIENT_ID = os.getenv("CLIENT_ID")
-CLIENT_SECRET = os.getenv("CLIENT_SECRET")
-REDIRECT_URI = os.getenv("REDIRECT_URI", "https://{your-repl-url}.repl.co/callback")
+DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "").strip()
+CLIENT_ID = os.getenv("CLIENT_ID", "").strip()
+CLIENT_SECRET = os.getenv("CLIENT_SECRET", "").strip()
+REDIRECT_URI = os.getenv("REDIRECT_URI", "https://{your-repl-url}.repl.co/callback").strip()
 
 intents = discord.Intents.default()
 intents.members = True
