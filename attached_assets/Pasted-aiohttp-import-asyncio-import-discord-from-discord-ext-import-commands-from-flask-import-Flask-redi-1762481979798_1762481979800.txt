@@ -1,0 +1,98 @@
+aiohttp
+import asyncio
+import discord
+from discord.ext import commands
+from flask import Flask, redirect, request
+import threading
+
+DISCORD_BOT_TOKEN = "MTQzNjE1NjI5MzU1NDM3Njc1NA.G9COiY.0h-IQgHQg5T4yO16ZPnFUfojbfBBw6tI8ujjd8"
+CLIENT_ID = "1436156293554376754"
+CLIENT_SECRET = "fLozmega39uFcJKy5F5UnkXxiaSzyylc"
+REDIRECT_URI = "http://localhost:5000/callback"
+
+# Setup Discord bot (using commands.Bot for easier usage)
+intents = discord.Intents.default()
+intents.members = True  # Needed to fetch members or DM users
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+app = Flask(__name__)
+
+loop = asyncio.get_event_loop()
+
+@app.route("/login")
+def login():
+    oauth_url = (
+        f"https://discord.com/api/oauth2/authorize?"
+        f"client_id={CLIENT_ID}&"
+        f"redirect_uri={REDIRECT_URI}&"
+        f"response_type=code&"
+        f"scope=identify guilds"
+    )
+    return redirect(oauth_url)
+
+@app.route("/callback")
+async def callback():
+    code = request.args.get('code')
+    if not code:
+        return "No code provided", 400
+
+    async with aiohttp.ClientSession() as session:
+        # Exchange code for access token
+        token_data = {
+            'client_id': CLIENT_ID,
+            'client_secret': CLIENT_SECRET,
+            'grant_type': 'authorization_code',
+            'code': code,
+            'redirect_uri': REDIRECT_URI,
+            'scope': 'identify guilds'
+        }
+
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        async with session.post('https://discord.com/api/v10/oauth2/token', data=token_data, headers=headers) as token_resp:
+            token_json = await token_resp.json()
+        
+        access_token = token_json.get("access_token")
+        if not access_token:
+            return "Failed to get access token", 400
+        
+        # Get user info (to get user ID)
+        auth_headers = {"Authorization": f"Bearer {access_token}"}
+        async with session.get("https://discord.com/api/v10/users/@me", headers=auth_headers) as user_resp:
+            user_data = await user_resp.json()
+        
+        user_id = int(user_data.get("id"))
+
+        # Get user guilds
+        async with session.get("https://discord.com/api/v10/users/@me/guilds", headers=auth_headers) as guilds_resp:
+            guilds = await guilds_resp.json()
+
+    # Format guild list message
+    guild_list = "\n".join([f"**{g['name']}** (ID: {g['id']})" for g in guilds])
+    dm_message = f"Here are the servers you belong to:\n\n{guild_list}" if guild_list else "You don't belong to any servers."
+
+    # Use bot to send DM asynchronously using asyncio.run_coroutine_threadsafe
+    async def send_dm(user_id, message):
+        user = bot.get_user(user_id)
+        if not user:
+            user = await bot.fetch_user(user_id)
+        try:
+            await user.send(message)
+        except Exception as e:
+            print(f"Failed to send DM: {e}")
+
+    future = asyncio.run_coroutine_threadsafe(send_dm(user_id, dm_message), loop)
+    try:
+        future.result(timeout=10)
+    except Exception as e:
+        print(f"Error sending DM: {e}")
+
+    return "I have sent your server list to your Discord DMs!"
+
+# Run Flask app in separate thread so it doesn't block discord bot
+def run_flask():
+    app.run(port=5000)
+
+if __name__ == "__main__":
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.start()
+    bot.run(DISCORD_BOT_TOKEN)
