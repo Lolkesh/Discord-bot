@@ -35,27 +35,30 @@ async def on_ready():
         print(f'Failed to sync commands: {e}')
     print('------')
 
-@bot.tree.command(name="scan", description="Get the mutual servers of a user")
-@app_commands.describe(username="The username of the person to scan")
-async def scan(interaction: discord.Interaction, username: str):
-    await interaction.response.defer(ephemeral=True)
+@bot.command(name="scan")
+async def scan(ctx, *, username: str = None):
+    if username is None:
+        await ctx.send("Usage: /scan \"username\"")
+        return
     
-    if not interaction.guild:
-        await interaction.followup.send("This command can only be used in a server!", ephemeral=True)
+    username = username.strip('"').strip()
+    
+    if not ctx.guild:
+        await ctx.send("This command can only be used in a server!")
         return
     
     target_member = None
-    for member in interaction.guild.members:
+    for member in ctx.guild.members:
         if member.name.lower() == username.lower() or member.display_name.lower() == username.lower():
             target_member = member
             break
     
     if not target_member:
-        await interaction.followup.send(f"User '{username}' not found in this server.", ephemeral=True)
+        await ctx.send(f"User '{username}' not found in this server.")
         return
     
     if target_member.bot:
-        await interaction.followup.send("Cannot scan bot users.", ephemeral=True)
+        await ctx.send("Cannot scan bot users.")
         return
     
     mutual_guilds = []
@@ -84,17 +87,17 @@ async def scan(interaction: discord.Interaction, username: str):
             chunks = [server_list_message]
     
     try:
-        command_user = interaction.user
+        command_user = ctx.author
         for chunk in chunks:
             await command_user.send(chunk)
             await asyncio.sleep(0.5)
         
-        await interaction.followup.send(f"Sent {target_member.name}'s server list to your DMs!", ephemeral=True)
+        await ctx.send(f"Sent {target_member.name}'s server list to your DMs!")
     except discord.Forbidden:
-        await interaction.followup.send("I cannot send you a DM. Please enable DMs from server members in your privacy settings.", ephemeral=True)
+        await ctx.send("I cannot send you a DM. Please enable DMs from server members in your privacy settings.")
     except Exception as e:
         print(f"Error sending DM: {e}")
-        await interaction.followup.send("An error occurred while sending the DM.", ephemeral=True)
+        await ctx.send("An error occurred while sending the DM.")
 
 @app.route("/")
 def home():
