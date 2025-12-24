@@ -41,6 +41,10 @@ async def scan(ctx, *, username: str = None):
         await ctx.send("Usage: /scan \"username\"")
         return
     
+    if not ctx.author.guild_permissions.administrator:
+        await ctx.send("You need admin permissions to use this command.")
+        return
+    
     username = username.strip('"').strip()
     
     if not ctx.guild:
