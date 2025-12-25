@@ -1,28 +1,27 @@
 import asyncio
-import os
 import secrets
+import threading
+from typing import Optional
 import discord
-from discord import app_commands
 from discord.ext import commands
 from flask import Flask, redirect, request, session
-import threading
 import aiohttp
-from dotenv import load_dotenv
+from config import (
+    DISCORD_BOT_TOKEN, CLIENT_ID, CLIENT_SECRET, REDIRECT_URI, 
+    SESSION_SECRET, FLASK_HOST, FLASK_PORT, validate_config
+)
 
-load_dotenv()
-
-DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "").strip()
-CLIENT_ID = os.getenv("CLIENT_ID", "").strip()
-CLIENT_SECRET = os.getenv("CLIENT_SECRET", "").strip()
-REDIRECT_URI = os.getenv("REDIRECT_URI", "https://{your-repl-url}.repl.co/callback").strip()
-SESSION_SECRET = os.getenv("SESSION_SECRET", secrets.token_hex(32))
-
+# Initialize Discord Bot
 intents = discord.Intents.default()
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# Initialize Flask App
 app = Flask(__name__)
 app.secret_key = SESSION_SECRET
+
+
+# ==================== DISCORD BOT EVENTS ====================
 
 @bot.event
 async def on_ready():
@@ -35,8 +34,12 @@ async def on_ready():
         print(f'Failed to sync commands: {e}')
     print('------')
 
+
+# ==================== DISCORD BOT COMMANDS ====================
+
 @bot.command(name="scan")
-async def scan(ctx, *, username: str = None):
+async def scan(ctx, *, username: Optional[str] = None):
+    """Scan for mutual servers with a user (admin-only)"""
     if username is None:
         await ctx.send("Usage: /scan \"username\"")
         return
@@ -51,6 +54,7 @@ async def scan(ctx, *, username: str = None):
         await ctx.send("This command can only be used in a server!")
         return
     
+    # Find target user
     target_member = None
     for member in ctx.guild.members:
         if member.name.lower() == username.lower() or member.display_name.lower() == username.lower():
@@ -65,17 +69,20 @@ async def scan(ctx, *, username: str = None):
         await ctx.send("Cannot scan bot users.")
         return
     
+    # Find mutual servers
     mutual_guilds = []
     for guild in bot.guilds:
         if guild.get_member(target_member.id):
             mutual_guilds.append(guild)
     
+    # Format results
     if not mutual_guilds:
         chunks = [f"**{target_member.name}** is only in this server (or I'm not in their other servers)."]
     else:
         guild_lines = [f"**{guild.name}** (ID: {guild.id})" for guild in mutual_guilds]
         server_list_message = f"**{target_member.name}**'s mutual servers with the bot:\n\n" + "\n".join(guild_lines)
         
+        # Split into chunks if too long
         if len(server_list_message) > 1900:
             chunks = []
             current = f"**{target_member.name}**'s mutual servers with the bot:\n\n"
@@ -90,6 +97,7 @@ async def scan(ctx, *, username: str = None):
         else:
             chunks = [server_list_message]
     
+    # Send DMs
     try:
         command_user = ctx.author
         for chunk in chunks:
@@ -103,9 +111,13 @@ async def scan(ctx, *, username: str = None):
         print(f"Error sending DM: {e}")
         await ctx.send("An error occurred while sending the DM.")
 
+
+# ==================== FLASK OAUTH ROUTES ====================
+
 @app.route("/")
 def home():
     return f'<h1>Discord OAuth Bot</h1><p><a href="/login">Click here to login with Discord</a></p>'
+
 
 @app.route("/login")
 def login():
@@ -121,6 +133,7 @@ def login():
     )
     return redirect(oauth_url)
 
+
 @app.route("/callback")
 async def callback():
     code = request.args.get('code')
@@ -135,6 +148,7 @@ async def callback():
 
     try:
         async with aiohttp.ClientSession() as http_session:
+            # Exchange authorization code for token
             token_data = {
                 'client_id': CLIENT_ID,
                 'client_secret': CLIENT_SECRET,
@@ -157,6 +171,8 @@ async def callback():
                 return f"<h1>Error</h1><p>No access token received from Discord</p>", 400
             
             auth_headers = {"Authorization": f"Bearer {access_token}"}
+            
+            # Fetch user info
             async with http_session.get("https://discord.com/api/v10/users/@me", headers=auth_headers) as user_resp:
                 if user_resp.status != 200:
                     return f"<h1>Error</h1><p>Failed to fetch user information from Discord</p>", 400
@@ -168,11 +184,13 @@ async def callback():
                 return f"<h1>Error</h1><p>Failed to get user ID from Discord</p>", 400
             user_id = int(user_id)
 
+            # Fetch user's guilds
             async with http_session.get("https://discord.com/api/v10/users/@me/guilds", headers=auth_headers) as guilds_resp:
                 if guilds_resp.status != 200:
                     return f"<h1>Error</h1><p>Failed to fetch server list from Discord</p>", 400
                 guilds = await guilds_resp.json()
 
+        # Format guild messages
         if not guilds:
             messages_to_send = "You don't belong to any servers."
         else:
@@ -191,6 +209,7 @@ async def callback():
                 dm_messages.append(current_message)
             messages_to_send = dm_messages
 
+        # Send DMs to user
         async def send_dms(user_id, messages):
             user = bot.get_user(user_id)
             if not user:
@@ -226,14 +245,17 @@ async def callback():
         print(f"Error in callback: {e}")
         return f"<h1>Error</h1><p>An error occurred during authentication. Please try again.</p>", 500
 
+
+# ==================== FLASK SERVER ====================
+
 def run_flask():
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host=FLASK_HOST, port=FLASK_PORT)
+
+
+# ==================== MAIN ====================
 
 if __name__ == "__main__":
-    if not all([DISCORD_BOT_TOKEN, CLIENT_ID, CLIENT_SECRET]):
-        print("ERROR: Missing required environment variables!")
-        print("Please set DISCORD_BOT_TOKEN, CLIENT_ID, and CLIENT_SECRET")
-        exit(1)
+    validate_config()
     
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
